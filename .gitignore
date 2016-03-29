@@ -5,7 +5,6 @@
 *.htm
 *.idb
 *.la
-*.lib
 *.lo
 *.log
 *.mac
