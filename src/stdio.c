@@ -39,6 +39,7 @@
  */
 HWND hStatus;
 char ubuffer[256];	// Buffer for ubpushf() messages we don't log right away
+extern FILE* rufusLog;
 
 #ifdef RUFUS_DEBUG
 void _uprintf(const char *format, ...)
@@ -63,6 +64,13 @@ void _uprintf(const char *format, ...)
 
 	// Send output to Windows debug facility
 	OutputDebugStringA(buf);
+
+	// print output to regular log file
+	if (rufusLog != NULL) {
+		fprintf(rufusLog, buf);
+		fflush(rufusLog);
+	}
+
 	if ((hLog != NULL) && (hLog != INVALID_HANDLE_VALUE)) {
 		// Send output to our log Window
 		Edit_SetSel(hLog, MAX_LOG_SIZE, MAX_LOG_SIZE);

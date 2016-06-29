@@ -149,6 +149,7 @@ enum user_message_type {
 	UM_PROGRESS_EXIT,
 	UM_NO_UPDATE,
 	UM_SET_PARTITION_SCHEME_TOOLTIP,
+	UM_ISO_SCAN_COMPLETE,
 	// Start of the WM IDs for the language menu items
 	UM_LANGUAGE_MENU = WM_APP + 0x100
 };

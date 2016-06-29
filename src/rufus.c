@@ -34,6 +34,7 @@
 #include <dbt.h>
 #include <io.h>
 #include <getopt.h>
+#include <time.h>
 
 #include "rufus.h"
 #include "missing.h"
@@ -58,6 +59,8 @@ PF_DECL(ImageList_AddIcon);
 PF_DECL(ImageList_ReplaceIcon);
 PF_TYPE_DECL(WINAPI, BOOL, SHChangeNotifyDeregister, (ULONG));
 PF_TYPE_DECL(WINAPI, ULONG, SHChangeNotifyRegister, (HWND, int, LONG, UINT, int, const MY_SHChangeNotifyEntry*));
+
+#define RUFUS_LOG_FILE "rufus.log"
 
 const char* cmdline_hogger = "rufus.com";
 const char* FileSystemLabel[FS_MAX] = { "FAT", "FAT32", "NTFS", "UDF", "exFAT", "ReFS" };
@@ -97,8 +100,9 @@ MY_BUTTON_IMAGELIST bi_iso = { 0 }, bi_up = { 0 }, bi_down = { 0 };
 GetTickCount64_t pfGetTickCount64 = NULL;
 char szFolderPath[MAX_PATH], app_dir[MAX_PATH], system_dir[MAX_PATH], sysnative_dir[MAX_PATH];
 char* image_path = NULL;
+char* drive_name = NULL;
 float fScale = 1.0f;
-int default_fs;
+int default_fs, return_code = NO_ERROR;
 uint32_t dur_mins, dur_secs;
 loc_cmd* selected_locale = NULL;
 WORD selected_langid = MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT);
@@ -109,7 +113,7 @@ BOOL use_own_c32[NB_OLD_C32] = {FALSE, FALSE}, mbr_selected_by_user = FALSE, tog
 BOOL iso_op_in_progress = FALSE, format_op_in_progress = FALSE, right_to_left_mode = FALSE;
 BOOL enable_HDDs = FALSE, force_update = FALSE, enable_ntfs_compression = FALSE, no_confirmation_on_cancel = FALSE, lock_drive = TRUE;
 BOOL advanced_mode, allow_dual_uefi_bios, detect_fakes, enable_vmdk, force_large_fat32, usb_debug, use_fake_units, preserve_timestamps;
-BOOL zero_drive = FALSE, list_non_usb_removable_drives = FALSE;
+BOOL zero_drive = FALSE, list_non_usb_removable_drives = FALSE, enable_silent = FALSE;
 int dialog_showing = 0, lang_button_id = 0;
 uint16_t rufus_version[3], embedded_sl_version[2];
 char embedded_sl_version_str[2][12] = { "?.??", "?.??" };
@@ -117,6 +121,7 @@ char embedded_sl_version_ext[2][32];
 RUFUS_UPDATE update = { {0,0,0}, {0,0}, NULL, NULL};
 StrArray DriveID, DriveLabel;
 extern char* szStatusMessage;
+extern FILE* rufusLog = NULL;
 
 static HANDLE format_thid = NULL;
 static HWND hBoot = NULL, hSelectISO = NULL, hStart = NULL;
@@ -842,7 +847,7 @@ BOOL CALLBACK LogProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM lParam)
 	long lfHeight, style;
 	DWORD log_size;
 	char *log_buffer = NULL, *filepath;
-	EXT_DECL(log_ext, "rufus.log", __VA_GROUP__("*.log"), __VA_GROUP__("Rufus log"));
+	EXT_DECL(log_ext, RUFUS_LOG_FILE, __VA_GROUP__("*.log"), __VA_GROUP__("Rufus log"));
 	switch (message) {
 	case WM_INITDIALOG:
 		apply_localization(IDD_LOG, hDlg);
@@ -1077,6 +1082,8 @@ DWORD WINAPI ISOScanThread(LPVOID param)
 out:
 	dont_display_image_name = FALSE;
 	PrintInfo(0, MSG_210);
+	
+	PostMessage(hMainDialog, UM_ISO_SCAN_COMPLETE, (WPARAM)FALSE, 0);
 	ExitThread(0);
 }
 
@@ -1883,12 +1890,6 @@ void InitDialog(HWND hDlg)
 		ToggleAdvanced(FALSE);
 	ToggleToGo();
 
-	// Process commandline parameters
-	if (iso_provided) {
-		// Simulate a button click for ISO selection
-		PostMessage(hDlg, WM_COMMAND, IDC_SELECT_ISO, 0);
-	}
-
 	PrintInfo(0, MSG_210);
 }
 
@@ -2046,6 +2047,43 @@ void SaveVHD(void)
 	}
 }
 
+/*
+  Burn the configuration or ISO image silently (unattended).
+*/
+void SilentRun() {
+	BOOL drive_found = FALSE;
+
+	if (enable_silent) {
+		uprintf("Silent (unattended) run was enabled");
+
+		// ensure drive name is provided before we continue
+		if (drive_name != NULL) {
+			int nb_devices = ComboBox_GetCount(hDeviceList);
+			char letters[32] = { 0 };
+
+			// find out needed target drive and set it as current
+			for (int i = 0; i < nb_devices; i++) {
+				DWORD devIndex = ComboBox_GetItemData(hDeviceList, i);
+				GetDriveLetters(devIndex, letters);
+
+				if (stricmp(letters, drive_name) == 0) {
+					// ensure the drive is selected and options for it are populated elsewhere
+					ComboBox_SetCurSel(hDeviceList, i);
+					PopulateProperties(ComboBox_GetCurSel(hDeviceList));
+					drive_found = TRUE;
+				}
+			}
+		}
+
+		if (!drive_found) {
+			uprintf("No available target drive found for silent execution: '%s'\n", drive_name);
+			PostMessage(hMainDialog, WM_CLOSE, 0, ERROR_INVALID_DRIVE);
+		} else {
+			// Simulate a button click for Start
+			PostMessage(hMainDialog, WM_COMMAND, (WPARAM)IDC_START, 0);
+		}
+	}
+}
 
 /*
  * Main dialog callback
@@ -2188,7 +2226,7 @@ static INT_PTR CALLBACK MainCallback(HWND hDlg, UINT message, WPARAM wParam, LPA
 						selected_locale = lcmd;
 						selected_langid = get_language_id(lcmd);
 						relaunch = TRUE;
-						PostMessage(hDlg, WM_COMMAND, IDCANCEL, 0);
+						PostMessage(hDlg, WM_COMMAND, IDCANCEL, lParam);
 					}
 					break;
 				}
@@ -2221,13 +2259,15 @@ static INT_PTR CALLBACK MainCallback(HWND hDlg, UINT message, WPARAM wParam, LPA
 			}
 			if ((pfSHChangeNotifyDeregister != NULL) && (ulRegister != 0))
 				pfSHChangeNotifyDeregister(ulRegister);
-			PostQuitMessage(0);
+			PostQuitMessage(lParam);
 			StrArrayDestroy(&DriveID);
 			StrArrayDestroy(&DriveLabel);
 			DestroyAllTooltips();
 			DestroyWindow(hLogDlg);
 			GetWindowRect(hDlg, &relaunch_rc);
-			EndDialog(hDlg, 0);
+
+			return_code = lParam;
+			EndDialog(hDlg, lParam);
 			break;
 		case IDC_ABOUT:
 			CreateAboutBox();
@@ -2465,8 +2505,13 @@ static INT_PTR CALLBACK MainCallback(HWND hDlg, UINT message, WPARAM wParam, LPA
 						if (dur_secs > UDF_FORMAT_WARN) {
 							dur_mins = dur_secs / 60;
 							dur_secs -= dur_mins * 60;
-							MessageBoxExU(hMainDialog, lmprintf(MSG_112, dur_mins, dur_secs), lmprintf(MSG_113),
-								MB_OK | MB_ICONASTERISK | MB_IS_RTL, selected_langid);
+
+							if (enable_silent) {
+								uprintf("%s\n", lmprintf(MSG_112, dur_mins, dur_secs));
+							} else {
+								MessageBoxExU(hMainDialog, lmprintf(MSG_112, dur_mins, dur_secs), lmprintf(MSG_113),
+									MB_OK | MB_ICONASTERISK | MB_IS_RTL, selected_langid);
+							}
 						} else {
 							dur_secs = 0;
 							dur_mins = 0;
@@ -2491,23 +2536,41 @@ static INT_PTR CALLBACK MainCallback(HWND hDlg, UINT message, WPARAM wParam, LPA
 				}
 
 				GetWindowTextU(hDeviceList, tmp, ARRAYSIZE(tmp));
-				if (MessageBoxExU(hMainDialog, lmprintf(MSG_003, tmp),
-					APPLICATION_NAME, MB_OKCANCEL|MB_ICONWARNING|MB_IS_RTL, selected_langid) == IDCANCEL) {
-					format_op_in_progress = FALSE;
-					zero_drive = FALSE;
-					break;
+
+				if (enable_silent) {
+					uprintf("%s\n", lmprintf(MSG_003, tmp));
+				} else {
+					if (MessageBoxExU(hMainDialog, lmprintf(MSG_003, tmp),
+						APPLICATION_NAME, MB_OKCANCEL | MB_ICONWARNING | MB_IS_RTL, selected_langid) == IDCANCEL) {
+						format_op_in_progress = FALSE;
+						zero_drive = FALSE;
+						break;
+					}
 				}
-				if ((SelectedDrive.nPartitions > 1) && (MessageBoxExU(hMainDialog, lmprintf(MSG_093),
-					lmprintf(MSG_094), MB_OKCANCEL|MB_ICONWARNING|MB_IS_RTL, selected_langid) == IDCANCEL)) {
-					format_op_in_progress = FALSE;
-					zero_drive = FALSE;
-					break;
+
+				if ((SelectedDrive.nPartitions > 1)) {
+					if (enable_silent) {
+						uprintf("%s\n", lmprintf(MSG_093));
+					} else {
+						if ((MessageBoxExU(hMainDialog, lmprintf(MSG_093), lmprintf(MSG_094), 
+								MB_OKCANCEL | MB_ICONWARNING | MB_IS_RTL, selected_langid) == IDCANCEL)) {
+							format_op_in_progress = FALSE;
+							zero_drive = FALSE;
+							break;
+						}
+					}
 				}
-				if ((!zero_drive) && (IsChecked(IDC_BOOT)) && (SelectedDrive.SectorSize != 512) &&
-					(MessageBoxExU(hMainDialog, lmprintf(MSG_196, SelectedDrive.SectorSize),
-						lmprintf(MSG_197), MB_OKCANCEL|MB_ICONWARNING|MB_IS_RTL, selected_langid) == IDCANCEL)) {
-					format_op_in_progress = FALSE;
-					break;
+
+				if ((!zero_drive) && (IsChecked(IDC_BOOT)) && (SelectedDrive.SectorSize != 512)) {
+					if (enable_silent) {
+						uprintf("%s\n", lmprintf(MSG_196, SelectedDrive.SectorSize));
+					} else {
+						if (MessageBoxExU(hMainDialog, lmprintf(MSG_196, SelectedDrive.SectorSize),
+							lmprintf(MSG_197), MB_OKCANCEL | MB_ICONWARNING | MB_IS_RTL, selected_langid) == IDCANCEL) {
+							format_op_in_progress = FALSE;
+							break;
+						}
+					}
 				}
 
 				// Disable all controls except cancel
@@ -2622,7 +2685,7 @@ static INT_PTR CALLBACK MainCallback(HWND hDlg, UINT message, WPARAM wParam, LPA
 			// WM_QUERYENDSESSION uses this value to prevent shutdown
 			return (INT_PTR)TRUE;
 		}
-		SendMessage(hDlg, WM_COMMAND, (WPARAM)IDCANCEL, (LPARAM)0);
+		SendMessage(hDlg, WM_COMMAND, (WPARAM)IDCANCEL, (LPARAM)lParam);
 		break;
 
 	case UM_PROGRESS_INIT:
@@ -2676,6 +2739,7 @@ static INT_PTR CALLBACK MainCallback(HWND hDlg, UINT message, WPARAM wParam, LPA
 			uprintf("\r\n");
 			GetDevices(DeviceNum);
 		}
+		BOOL isError = TRUE;
 		if (!IS_ERROR(FormatStatus)) {
 			// This is the only way to achieve instantaneous progress transition to 100%
 			SendMessage(hProgress, PBM_SETRANGE, 0, ((MAX_PROGRESS+1)<<16) & 0xFFFF0000);
@@ -2683,6 +2747,7 @@ static INT_PTR CALLBACK MainCallback(HWND hDlg, UINT message, WPARAM wParam, LPA
 			SendMessage(hProgress, PBM_SETRANGE, 0, (MAX_PROGRESS<<16) & 0xFFFF0000);
 			SetTaskbarProgressState(TASKBAR_NOPROGRESS);
 			PrintInfo(0, MSG_210);
+			isError = FALSE;
 		} else if (SCODE_CODE(FormatStatus) == ERROR_CANCELLED) {
 			SendMessage(hProgress, PBM_SETSTATE, (WPARAM)PBST_PAUSED, 0);
 			SetTaskbarProgressState(TASKBAR_PAUSED);
@@ -2696,7 +2761,16 @@ static INT_PTR CALLBACK MainCallback(HWND hDlg, UINT message, WPARAM wParam, LPA
 		}
 		FormatStatus = 0;
 		format_op_in_progress = FALSE;
+
+		if (enable_silent) {
+			// silent mode does its job and exits
+			PostMessage(hMainDialog, WM_CLOSE, 0, isError ? ERROR_WRITE_FAULT : NO_ERROR);
+		}
 		return (INT_PTR)TRUE;
+
+	case UM_ISO_SCAN_COMPLETE: // ISO Scan thread has finished its work
+		SilentRun();
+		break;
 
 	// Ensures that SetPartitionSchemeTooltip() can be called from the original thread
 	case UM_SET_PARTITION_SCHEME_TOOLTIP:
@@ -2711,18 +2785,26 @@ static void PrintUsage(char* appname)
 	char fname[_MAX_FNAME];
 
 	_splitpath(appname, NULL, NULL, fname, NULL);
-	printf("\nUsage: %s [-f] [-g] [-h] [-i PATH] [-l LOCALE] [-w TIMEOUT]\n", fname);
+	printf("\nUsage: %s [-d DRIVE] [-f] [-g] [-h] [-i PATH] [-l LOCALE] [-p] [-s] [-w TIMEOUT]\n", fname);
+	printf("  -d, --drive=DRIVE\n");
+	printf("     Set the destination drive\n");
 	printf("  -f, --fixed\n");
 	printf("     Enable the listing of fixed/HDD USB drives\n");
 	printf("  -g, --gui\n");
-	printf("     Start in GUI mode (disable the 'rufus.com' commandline hogger)\n");
+	printf("     Hide GUI\n");
 	printf("  -i PATH, --iso=PATH\n");
 	printf("     Select the ISO image pointed by PATH to be used on startup\n");
 	printf("  -l LOCALE, --locale=LOCALE\n");
 	printf("     Select the locale to be used on startup\n");
+	printf("  -p, --print\n");
+	printf("     List available drives and exit\n");
+	printf("  -s, --silent\n");
+	printf("     Run unattended (silent)\n");
 	printf("  -w TIMEOUT, --wait=TIMEOUT\n");
 	printf("     Wait TIMEOUT tens of seconds for the global application mutex to be released.\n");
 	printf("     Used when launching a newer version of " APPLICATION_NAME " from a running application.\n");
+	printf("  -z, --nohogz\n");
+	printf("     Disable the 'rufus.com' commandline hogger\n");
 	printf("  -h, --help\n");
 	printf("     This usage guide.\n");
 }
@@ -2828,6 +2910,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 	FILE* fd;
 	BOOL attached_console = FALSE, external_loc_file = FALSE, lgp_set = FALSE, automount, disable_hogger = FALSE;
 	BOOL previous_enable_HDDs = FALSE;
+	BOOL hide_gui = FALSE, list_drives = FALSE;
 	BYTE *loc_data;
 	DWORD loc_size, size;
 	char tmp_path[MAX_PATH] = "", loc_file[MAX_PATH] = "", ini_path[MAX_PATH] = "", ini_flags[] = "rb";
@@ -2839,20 +2922,37 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 	HWND hDlg = NULL;
 	HDC hDC;
 	MSG msg;
+	time_t     now = time(0);
+	struct tm  tstruct;
+	char       timebuf[100];
+	
 	struct option long_options[] = {
+		{"drive",   required_argument, NULL, 'd'},
 		{"fixed",   no_argument,       NULL, 'f'},
 		{"gui",     no_argument,       NULL, 'g'},
 		{"help",    no_argument,       NULL, 'h'},
 		{"iso",     required_argument, NULL, 'i'},
 		{"locale",  required_argument, NULL, 'l'},
+		{"nohogz",  no_argument,       NULL, 'z'},
+		{"print",   no_argument,       NULL, 'p'},
+		{"silent",  no_argument,       NULL, 's'},
 		{"wait",    required_argument, NULL, 'w'},
 		{0, 0, NULL, 0}
 	};
 
+	rufusLog = fopen(RUFUS_LOG_FILE, "wt");
+	if (!rufusLog) {
+		printf("unable to open log file " RUFUS_LOG_FILE " for writing!\n");
+	}
+
 	// Disable loading system DLLs from the current directory (sideloading mitigation)
 	SetDllDirectoryA("");
 
-	uprintf("*** " APPLICATION_NAME " init ***\n");
+	// Get current date/time, format is YYYY-MM-DD.HH:mm:ss
+	tstruct = *localtime(&now);
+	strftime(timebuf, sizeof(timebuf), "%Y-%m-%d.%X", &tstruct);
+
+	uprintf("*** " APPLICATION_NAME " (%s) init ***\n", timebuf);
 	PF_INIT(GetTickCount64, kernel32);
 
 	// Reattach the console, if we were started from commandline
@@ -2879,7 +2979,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 				// We need to find if we need to disable the hogger BEFORE we start
 				// processing arguments with getopt, as we may want to print messages
 				// on the commandline then, which the hogger makes more intuitive.
-				if ((strcmp(argv[i], "-g") == 0) || (strcmp(argv[i], "--gui") == 0))
+				if ((strcmp(argv[i], "-z") == 0) || (strcmp(argv[i], "--nohogz") == 0))
 					disable_hogger = TRUE;
 			}
 
@@ -2894,13 +2994,17 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 			// Now enable the hogger before processing the rest of the arguments
 			hogmutex = SetHogger(attached_console, disable_hogger);
 
-			while ((opt = getopt_long(argc, argv, "?fghi:w:l:", long_options, &option_index)) != EOF) {
+			while ((opt = getopt_long(argc, argv, "?dfghi:w:l:psz", long_options, &option_index)) != EOF) {
 				switch (opt) {
+				case 'd':
+					// USB drive to write the data to
+					drive_name = safe_strdup(optarg);
+					break;
 				case 'f':
 					enable_HDDs = TRUE;
 					break;
 				case 'g':
-					// No need to reprocess that option
+					hide_gui = TRUE;
 					break;
 				case 'i':
 					if (_access(optarg, 0) != -1) {
@@ -2908,7 +3012,9 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 						iso_provided = TRUE;
 					}
 					else {
-						printf("Could not find ISO image '%s'\n", optarg);
+						uprintf("Could not find ISO image '%s'\n", optarg);
+						return_code = ERROR_FILE_NOT_FOUND;
+						goto out;
 					}
 					break;
 				case 'l':
@@ -2920,8 +3026,18 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 						locale_name = safe_strdup(optarg);
 					}
 					break;
+				case 'p':
+					list_drives = TRUE;
+					break;
+				case 's':
+					// run silently
+					enable_silent = TRUE;
+					break;
 				case 'w':
 					wait_for_mutex = atoi(optarg);
+					break;
+				case 'z':
+					// Process this option elsewhere
 					break;
 				case '?':
 				case 'h':
@@ -3123,9 +3239,35 @@ relaunch:
 		}
 	}
 
-	ShowWindow(hDlg, SW_SHOWNORMAL);
+	ShowWindow(hDlg, hide_gui ? SW_HIDE : SW_SHOWNORMAL);
 	UpdateWindow(hDlg);
 
+	if (list_drives) {
+		// dump info and exit
+		int nb_devices = ComboBox_GetCount(hDeviceList);
+		printf("\nAvailable USB drives: %d\n", nb_devices);
+
+		for (int i = 0; i < nb_devices; i++) {
+			DWORD devIndex = ComboBox_GetItemData(hDeviceList, i);
+			char letters[27] = { 0 };
+
+			GetDriveLetters(devIndex, letters);
+			uint64_t size = GetDriveSize(devIndex);
+			printf("%s %" PRIu64 "\n", letters, size);
+		}
+
+		PostMessage(hMainDialog, WM_CLOSE, 0, NO_ERROR);
+	}
+
+	if (iso_provided) {
+		// imitate button press for ISO selection
+		SendMessage(hDlg, WM_COMMAND, IDC_SELECT_ISO, 0);
+		// SilentRun will be invoked after ISO Scan thread finishes
+	} else {
+		// no ISO, run silently if needed
+		SilentRun();
+	}
+	
 	// Do our own event processing and process "magic" commands
 	while(GetMessage(&msg, NULL, 0, 0)) {
 
@@ -3364,5 +3506,5 @@ out:
 	_CrtDumpMemoryLeaks();
 #endif
 
-	return 0;
+	return return_code;
 }
