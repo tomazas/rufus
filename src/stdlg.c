@@ -65,6 +65,7 @@ static BOOL settings_commcheck = FALSE;
 static WNDPROC update_original_proc = NULL;
 
 extern loc_cmd* selected_locale;
+extern BOOL enable_silent, hide_gui;
 
 /*
  * We need a sub-callback to read the content of the edit box on exit and update
@@ -1365,7 +1366,7 @@ BOOL SetUpdateCheck(void)
 	settings_commcheck = TRUE;
 
 	// If the update interval is not set, this is the first time we run so prompt the user
-	if (ReadSetting32(SETTING_UPDATE_INTERVAL) == 0) {
+	if (ReadSetting32(SETTING_UPDATE_INTERVAL) == 0 && !enable_silent && !hide_gui) {
 
 		// Add a hack for people who'd prefer the app not to prompt about update settings on first run.
 		// If the executable is called "rufus.exe", without version, we disable the prompt

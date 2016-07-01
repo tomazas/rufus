@@ -61,6 +61,7 @@ PF_TYPE_DECL(WINAPI, BOOL, SHChangeNotifyDeregister, (ULONG));
 PF_TYPE_DECL(WINAPI, ULONG, SHChangeNotifyRegister, (HWND, int, LONG, UINT, int, const MY_SHChangeNotifyEntry*));
 
 #define RUFUS_LOG_FILE "rufus.log"
+#define RUFUS_OUT "rufus.console"
 
 const char* cmdline_hogger = "rufus.com";
 const char* FileSystemLabel[FS_MAX] = { "FAT", "FAT32", "NTFS", "UDF", "exFAT", "ReFS" };
@@ -113,7 +114,7 @@ BOOL use_own_c32[NB_OLD_C32] = {FALSE, FALSE}, mbr_selected_by_user = FALSE, tog
 BOOL iso_op_in_progress = FALSE, format_op_in_progress = FALSE, right_to_left_mode = FALSE;
 BOOL enable_HDDs = FALSE, force_update = FALSE, enable_ntfs_compression = FALSE, no_confirmation_on_cancel = FALSE, lock_drive = TRUE;
 BOOL advanced_mode, allow_dual_uefi_bios, detect_fakes, enable_vmdk, force_large_fat32, usb_debug, use_fake_units, preserve_timestamps;
-BOOL zero_drive = FALSE, list_non_usb_removable_drives = FALSE, enable_silent = FALSE;
+BOOL zero_drive = FALSE, list_non_usb_removable_drives = FALSE;
 int dialog_showing = 0, lang_button_id = 0;
 uint16_t rufus_version[3], embedded_sl_version[2];
 char embedded_sl_version_str[2][12] = { "?.??", "?.??" };
@@ -122,6 +123,8 @@ RUFUS_UPDATE update = { {0,0,0}, {0,0}, NULL, NULL};
 StrArray DriveID, DriveLabel;
 extern char* szStatusMessage;
 extern FILE* rufusLog = NULL;
+extern BOOL enable_silent = FALSE;
+extern BOOL hide_gui = FALSE;
 
 static HANDLE format_thid = NULL;
 static HWND hBoot = NULL, hSelectISO = NULL, hStart = NULL;
@@ -2910,7 +2913,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 	FILE* fd;
 	BOOL attached_console = FALSE, external_loc_file = FALSE, lgp_set = FALSE, automount, disable_hogger = FALSE;
 	BOOL previous_enable_HDDs = FALSE;
-	BOOL hide_gui = FALSE, list_drives = FALSE;
+	BOOL list_drives = FALSE;
 	BYTE *loc_data;
 	DWORD loc_size, size;
 	char tmp_path[MAX_PATH] = "", loc_file[MAX_PATH] = "", ini_path[MAX_PATH] = "", ini_flags[] = "rb";
@@ -2963,6 +2966,12 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 		IGNORE_RETVAL(freopen("CONOUT$", "w", stderr));
 		_flushall();
 	}
+
+	FILE* frd = fopen(RUFUS_OUT, "wt");
+	if (frd) fclose(frd);
+
+	freopen(RUFUS_OUT, "a", stdout);
+	freopen(RUFUS_OUT, "a", stderr);
 
 	// We have to process the arguments before we acquire the lock and process the locale
 	PF_INIT(__wgetmainargs, Msvcrt);
