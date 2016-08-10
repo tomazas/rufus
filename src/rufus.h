@@ -254,6 +254,7 @@ enum checksum_type {
 #define HAS_INSTALL_WIM(r)  (r.install_wim_path[0] != 0)
 #define HAS_TOGO(r)         (r.has_bootmgr && r.has_efi && HAS_INSTALL_WIM(r) && (r.install_wim_version < MAX_WIM_VERSION))
 #define IS_WINPE(r)         (((r & WINPE_MININT) == WINPE_MININT)||(( r & WINPE_I386) == WINPE_I386))
+#define IS_WINDOWS(r)       ((r.has_bootmgr) || (r.uses_minint) || IS_WINPE(r.winpe))
 #define IS_WIN7_EFI(r)      ((r.has_efi == 1) && HAS_INSTALL_WIM(r))
 #define IS_REACTOS(r)       (r.reactos_path[0] != 0)
 #define IS_GRUB(r)          ((r.has_grub2) || (r.has_grub4dos))
@@ -466,6 +467,10 @@ extern BOOL IsBufferInDB(const unsigned char* buf, const size_t len);
 #define printbits(x) _printbits(sizeof(x), &x, 0)
 #define printbitslz(x) _printbits(sizeof(x), &x, 1)
 extern char* _printbits(size_t const size, void const * const ptr, int leading_zeroes);
+extern BOOL IsCurrentProcessElevated(void);
+extern char* GetCurrentMUI(void);
+extern BOOL SetFormatPromptHook(void);
+extern void ClrFormatPromptHook(void);
 
 DWORD WINAPI FormatThread(void* param);
 DWORD WINAPI SaveImageThread(void* param);

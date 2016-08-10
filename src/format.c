@@ -808,7 +808,7 @@ out:
 static BOOL ClearMBRGPT(HANDLE hPhysicalDrive, LONGLONG DiskSize, DWORD SectorSize, BOOL add1MB)
 {
 	BOOL r = FALSE;
-	uint64_t i, last_sector = DiskSize/SectorSize;
+	uint64_t i, last_sector = DiskSize/SectorSize, num_sectors_to_clear;
 	unsigned char* pBuf = (unsigned char*) calloc(SectorSize, 1);
 
 	PrintInfoDebug(0, MSG_224);
@@ -820,10 +820,14 @@ static BOOL ClearMBRGPT(HANDLE hPhysicalDrive, LONGLONG DiskSize, DWORD SectorSi
 	// beginning and 33 at the end. We bump these values to MAX_SECTORS_TO_CLEAR each end to help
 	// with reluctant access to large drive.
 
-	// Must clear at least 1MB + the PBR for large FAT32 format to work on a large drive
-	// Don't do it if Large FAT32 is not enabled, as it can take time for slow drives.
-	uprintf("Erasing %d sectors", (add1MB?2048:0)+MAX_SECTORS_TO_CLEAR);
-	for (i=0; i<((add1MB?2048:0)+MAX_SECTORS_TO_CLEAR); i++) {
+	// We try to clear at least 1MB + the PBR when Large FAT32 is selected (add1MB), but
+	// don't do it otherwise, as it seems unnecessary and may take time for slow drives.
+	// Also, for various reasons (one of which being that Windows seems to have issues
+	// with GPT drives that contain a lot of small partitions) we try not not to clear
+	// sectors further than the lowest partition already residing on the disk.
+	num_sectors_to_clear = min(SelectedDrive.FirstDataSector, (DWORD)((add1MB ? 2048 : 0) + MAX_SECTORS_TO_CLEAR));
+	uprintf("Erasing %d sectors", num_sectors_to_clear);
+	for (i=0; i<num_sectors_to_clear; i++) {
 		if ((IS_ERROR(FormatStatus)) || (write_sectors(hPhysicalDrive, SectorSize, i, 1, pBuf) != SectorSize)) {
 			goto out;
 		}
@@ -908,7 +912,7 @@ static BOOL WriteMBR(HANDLE hPhysicalDrive)
 
 	// What follows is really a case statement with complex conditions listed
 	// by order of preference
-	if ((allow_dual_uefi_bios) && (tt == TT_BIOS))
+	if (IS_WINDOWS(img_report) && (allow_dual_uefi_bios) && (tt == TT_BIOS))
 		goto windows_mbr;
 
 	// Forced UEFI (by zeroing the MBR)
@@ -1402,50 +1406,6 @@ static BOOL SetupWinToGo(const char* drive_name, BOOL use_ms_efi)
 	return TRUE;
 }
 
-/*
- * Detect if a Windows Format prompt is active, by enumerating the
- * whole Windows tree and looking for the relevant popup
- */
-static BOOL CALLBACK FormatPromptCallback(HWND hWnd, LPARAM lParam)
-{
-	char str_buf[MAX_PATH];
-	HWND *hFound = (HWND*)lParam;
-	static const char* security_string = "Microsoft Windows";
-
-	// The format prompt has the popup window style
-	if (GetWindowLong(hWnd, GWL_STYLE) & WS_POPUPWINDOW) {
-		str_buf[0] = 0;
-		GetWindowTextA(hWnd, str_buf, MAX_PATH);
-		str_buf[MAX_PATH-1] = 0;
-		if (safe_strcmp(str_buf, security_string) == 0) {
-			*hFound = hWnd;
-			return TRUE;
-		}
-	}
-	return TRUE;
-}
-
-/*
- * When we format a drive that doesn't have any existing partitions, we can't lock it
- * prior to partitioning, which means that Windows will display a "You need to format the
- * disk in drive X: before you can use it'. You will also get that popup if you start a
- * bad blocks check and cancel it before it completes. We have to close that popup manually.
- */
-static DWORD WINAPI CloseFormatPromptThread(LPVOID param) {
-	HWND hFormatPrompt;
-
-	while(format_op_in_progress) {
-		hFormatPrompt = NULL;
-		EnumChildWindows(GetDesktopWindow(), FormatPromptCallback, (LPARAM)&hFormatPrompt);
-		if (hFormatPrompt != NULL) {
-			SendMessage(hFormatPrompt, WM_COMMAND, (WPARAM)IDCANCEL, (LPARAM)0);
-			uprintf("Closed Windows format prompt\n");
-		}
-		Sleep(100);
-	}
-	ExitThread(0);
-}
-
 static void update_progress(const uint64_t processed_bytes)
 {
 	if (_GetTickCount64() > LastRefresh + MAX_REFRESH) {
@@ -1678,12 +1638,11 @@ DWORD WINAPI FormatThread(void* param)
 	// Note, Microsoft's way of cleaning partitions (IOCTL_DISK_CREATE_DISK, which is what we apply
 	// in InitializeDisk) is *NOT ENOUGH* to reset a disk and can render it inoperable for partitioning
 	// or formatting under Windows. See https://github.com/pbatard/rufus/issues/759 for details.
-	if ((!ClearMBRGPT(hPhysicalDrive, SelectedDrive.DiskSize, SelectedDrive.SectorSize, FALSE)) || (!InitializeDisk(hPhysicalDrive)) ) {
+	if ((!ClearMBRGPT(hPhysicalDrive, SelectedDrive.DiskSize, SelectedDrive.SectorSize, use_large_fat32)) || (!InitializeDisk(hPhysicalDrive)) ) {
 		uprintf("Could not reset partitions\n");
 		FormatStatus = ERROR_SEVERITY_ERROR|FAC(FACILITY_STORAGE)|ERROR_PARTITION_FAILURE;
 		goto out;
 	}
-	CreateThread(NULL, 0, CloseFormatPromptThread, NULL, 0, NULL);
 
 	if (IsChecked(IDC_BADBLOCKS)) {
 		do {
@@ -1867,7 +1826,7 @@ DWORD WINAPI FormatThread(void* param)
 			}
 		} else if ( (bt == BT_SYSLINUX_V4) || (bt == BT_SYSLINUX_V6) ||
 			((bt == BT_ISO) && (HAS_SYSLINUX(img_report) || IS_REACTOS(img_report)) &&
-				(!allow_dual_uefi_bios) && (IS_FAT(fs))) ) {
+				(!IS_WINDOWS(img_report) || !allow_dual_uefi_bios) && (IS_FAT(fs))) ) {
 			if (!InstallSyslinux(DriveIndex, drive_name[0], fs)) {
 				FormatStatus = ERROR_SEVERITY_ERROR|FAC(FACILITY_STORAGE)|ERROR_INSTALL_FAILURE;
 			}
