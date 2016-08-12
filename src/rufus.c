@@ -124,7 +124,7 @@ StrArray DriveID, DriveLabel;
 extern char* szStatusMessage;
 extern FILE* rufusLog = NULL;
 extern BOOL enable_silent = FALSE;
-extern BOOL hide_gui = FALSE;
+extern BOOL hide_gui = FALSE, no_icons = FALSE;
 
 static HANDLE format_thid = NULL;
 static HWND hBoot = NULL, hSelectISO = NULL, hStart = NULL;
@@ -1768,7 +1768,7 @@ void InitDialog(HWND hDlg)
 	// Set various checkboxes
 	CheckDlgButton(hDlg, IDC_QUICKFORMAT, BST_CHECKED);
 	CheckDlgButton(hDlg, IDC_BOOT, BST_CHECKED);
-	CheckDlgButton(hDlg, IDC_SET_ICON, BST_CHECKED);
+	CheckDlgButton(hDlg, IDC_SET_ICON, no_icons ? BST_UNCHECKED : BST_CHECKED);
 
 	// Load system icons (NB: Use the excellent http://www.nirsoft.net/utils/iconsext.html to find icon IDs)
 	hShell32DllInst = GetLibraryHandle("Shell32");
@@ -2808,9 +2808,11 @@ static void PrintUsage(char* appname)
 	char fname[_MAX_FNAME];
 
 	_splitpath(appname, NULL, NULL, fname, NULL);
-	printf("\nUsage: %s [-d DRIVE] [-f] [-g] [-h] [-i PATH] [-l LOCALE] [-p] [-s] [-w TIMEOUT]\n", fname);
+	printf("\nUsage: %s [-d DRIVE] [-e] [-f] [-g] [-h] [-i PATH] [-l LOCALE] [-p] [-s] [-w TIMEOUT]\n", fname);
 	printf("  -d, --drive=DRIVE\n");
 	printf("     Set the destination drive\n");
+	printf("  -e, --noext\n"); //
+	printf("     Do not create extended label and icon files\n");
 	printf("  -f, --fixed\n");
 	printf("     Enable the listing of fixed/HDD USB drives\n");
 	printf("  -g, --gui\n");
@@ -2983,11 +2985,14 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 			// Now enable the hogger before processing the rest of the arguments
 			hogmutex = SetHogger(attached_console, disable_hogger);
 
-			while ((opt = getopt_long(argc, argv, "?dfghi:w:l:psz", long_options, &option_index)) != EOF) {
+			while ((opt = getopt_long(argc, argv, "?defghi:w:l:psz", long_options, &option_index)) != EOF) {
 				switch (opt) {
 				case 'd':
 					// USB drive to write the data to
 					drive_name = safe_strdup(optarg);
+					break;
+				case 'e':
+					no_icons = TRUE; // disable the icons & autorun
 					break;
 				case 'f':
 					enable_HDDs = TRUE;
